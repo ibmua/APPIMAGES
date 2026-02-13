@@ -1,15 +1,15 @@
 # 🚀 install-appimage
 
-Install AppImages so they show in your app launcher, get proper icons, and can be pinned/favorited.
+Install AppImages so they show up in your app launcher, get proper icons, and can be pinned or favorited — on any Linux desktop.
 
-Works in two modes:
+Two modes depending on what you need:
 
-- 📦 `extract` mode (default): unpack AppImage and run `AppRun`
-- 🧳 `keep` mode: keep the `.AppImage` file and launch it directly
+- 📦 **Extract** (default) — unpacks the AppImage and runs `AppRun` from a stable directory. Fixes Electron sandbox errors.
+- 🧳 **Keep** — leaves the `.AppImage` file intact and launches it directly. Still gets a desktop entry and icon.
 
-## 🔎 Common Error This Solves
+## 🔎 Common Errors This Solves
 
-If you searched for these errors, this tool is for you:
+If you landed here searching for one of these, you're in the right place:
 
 ```text
 FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:166
@@ -17,40 +17,35 @@ The SUID sandbox helper binary was found, but is not configured correctly.
 You need to make sure that /tmp/.mount_.../chrome-sandbox is owned by root and has mode 4755.
 ```
 
-Search terms this README targets:
+Related searches:
 
-- `LM Studio AppImage not launching Ubuntu`
+- `AppImage not launching Ubuntu`
 - `setuid_sandbox_host.cc:166`
 - `AppImage chrome-sandbox mode 4755`
 - `The SUID sandbox helper binary was found`
 - `AppImage desktop icon not showing`
 - `How to pin AppImage to dock`
+- `Electron AppImage sandbox error Linux`
 
-## ✨ What You Get
-
-- ✅ Desktop entry in `~/.local/share/applications`
-- ✅ Icon path resolved from inside the AppImage
-- ✅ Launch command rewritten to a stable install path
-- ✅ Version-agnostic `-latest` symlink for easier updates
-- ✅ App launcher visibility and pin-to-dock/favorites support
+Just run install-appimage in extract mode (the default). It places the app in a stable directory and fixes `chrome-sandbox` permissions automatically — no more fragile `/tmp/.mount_*` paths.
 
 ## ⚡ Quick Start
 
-### 1) Fix LM Studio / Electron sandbox errors fast (recommended)
+### 1) Extract install (fixes sandbox errors)
 
 ```bash
-./install-appimage LM-Studio-0.4.2-2-x64.AppImage
+./install-appimage MyApp-1.2.3-x64.AppImage
 ```
 
-This uses `extract` mode and is best for problematic sandbox cases.
+Best for Electron apps that hit the `chrome-sandbox` / `setuid_sandbox_host` error.
 
-### 2) Keep AppImage file as-is (no full extracted install)
+### 2) Keep the .AppImage file as-is
 
 ```bash
 ./install-appimage --keep-appimage MyApp.AppImage ~/Applications/
 ```
 
-This keeps execution from the `.AppImage` file while still creating desktop launcher + icon.
+Keeps execution from the `.AppImage` file while still creating a desktop launcher and icon.
 
 ### 3) Keep mode + custom runtime args (for stubborn apps)
 
@@ -58,22 +53,29 @@ This keeps execution from the `.AppImage` file while still creating desktop laun
 ./install-appimage --keep-appimage -a "--no-sandbox" MyApp.AppImage ~/Applications/
 ```
 
+## ✨ What You Get
+
+- ✅ Desktop entry in `~/.local/share/applications/`
+- ✅ Icon resolved from inside the AppImage
+- ✅ Stable install path (no more `/tmp/.mount_*` breakage)
+- ✅ Version-agnostic `-latest` symlink for painless updates
+- ✅ App shows up in your launcher and can be pinned/favorited
+
 ## 🧠 How It Works
 
 ### 📦 Extract mode (default)
 
-1. Extracts the AppImage.
-1. Installs to a stable directory like `/home/i/Documents/myapp-1.2.3/`.
-1. Sets desktop `Exec=` to stable `AppRun` path.
-1. Resolves icon to an absolute image path.
-1. Creates `<app>-latest` symlink when version is detected.
+1. Extracts the AppImage contents.
+2. Installs to a stable directory like `~/Documents/myapp-1.2.3/`.
+3. Points the desktop entry's `Exec=` at the stable `AppRun` path.
+4. Resolves the icon to an absolute path so the launcher finds it.
+5. Creates a `<app>-latest` symlink when a version number is detected.
 
 ### 🧳 Keep mode
 
-1. Copies `.AppImage` to target install directory.
-1. Marks it executable.
-1. Builds desktop entry that points `Exec=` to that `.AppImage` (or `<app>-latest.AppImage` symlink).
-1. Extracts icon metadata and persists icon under `~/.local/share/icons/install-appimage/`.
+1. Copies the `.AppImage` to the target directory and marks it executable.
+2. Builds a desktop entry pointing `Exec=` at the `.AppImage` (or a `-latest.AppImage` symlink).
+3. Extracts and persists the icon under `~/.local/share/icons/install-appimage/`.
 
 ## 🛠 Usage
 
@@ -92,82 +94,84 @@ Options:
   -h, --help             Show help message
 ```
 
-## 📌 Pinning Notes
-
-To pin/favorite in GNOME/KDE/XFCE:
-
-1. Install with desktop entry enabled (default).
-1. Launch app from app menu once.
-1. Right-click running app icon and choose Pin/Favorite.
-
-If pinning does not appear immediately, refresh desktop database:
-
-```bash
-update-desktop-database ~/.local/share/applications/
-```
-
 ## 🧪 Examples
 
 ```bash
 # default extract install
-./install-appimage LM-Studio-0.4.2-2-x64.AppImage
+./install-appimage Bambu_Studio_ubuntu-24.04.AppImage
 
-# keep mode in custom directory
-./install-appimage --keep-appimage Bambu_Studio_ubuntu-24.04_PR-9540.AppImage ~/Applications/
+# keep mode, custom directory
+./install-appimage --keep-appimage OrcaSlicer-1.9.0-x64.AppImage ~/Applications/
 
-# no desktop entry
-./install-appimage --no-desktop "OrcaSlicer_Linux_AppImage_Ubuntu2404_nightly (1).AppImage"
+# skip the desktop entry
+./install-appimage --no-desktop SomeToolkit.AppImage
 
 # custom launcher name
-./install-appimage -n "LM Studio Development" LM-Studio-dev.AppImage
+./install-appimage -n "My Custom Name" SomeApp-nightly.AppImage
+```
+
+## 📌 Pinning to Dock
+
+After installing:
+
+1. Open the app from your launcher/app menu.
+2. Right-click the running app's icon and choose **Pin** or **Add to Favorites**.
+
+If it doesn't appear right away, refresh the desktop database:
+
+```bash
+update-desktop-database ~/.local/share/applications/
 ```
 
 ## 🆘 Troubleshooting
 
 ### `The SUID sandbox helper binary was found, but is not configured correctly`
 
-Use extract mode:
+Use extract mode (the default). It installs to a stable path and fixes `chrome-sandbox` ownership and permissions automatically:
 
 ```bash
-./install-appimage <your-file>.AppImage
+./install-appimage YourApp.AppImage
 ```
-
-It avoids relying on fragile `/tmp/.mount_*` runtime paths and uses a stable install location.
 
 ### `/tmp/.mount_.../chrome-sandbox is owned by root and has mode 4755`
 
-Same fix: install via this tool instead of direct `./AppImage` launch.
+Same fix — install via this tool instead of launching the `.AppImage` directly.
 
-In extract mode, if `chrome-sandbox` exists, the script tries:
+In extract mode, if `chrome-sandbox` exists, the script runs:
 
 ```bash
 sudo chown root:root <install-path>/chrome-sandbox
 sudo chmod 4755 <install-path>/chrome-sandbox
 ```
 
+If the automatic fix fails, the script will tell you. You can also pass `--no-sandbox` as a workaround:
+
+```bash
+./install-appimage --keep-appimage -a "--no-sandbox" YourApp.AppImage
+```
+
 ### App icon missing in launcher
 
-- Re-run install so icon resolution is regenerated.
-- Confirm desktop file exists in `~/.local/share/applications/`.
-- Refresh desktop db:
-  `update-desktop-database ~/.local/share/applications/`
+- Re-run install-appimage so icon resolution runs again.
+- Check that the desktop file exists: `ls ~/.local/share/applications/`
+- Refresh: `update-desktop-database ~/.local/share/applications/`
 
 ### App not visible in menu / not pinnable
 
-- Log out/in once after installation.
-- Ensure the `.desktop` file has `Type=Application` and valid `Exec=`.
-- Launch from app menu first, then pin from running icon.
+- Log out and back in after installing.
+- Make sure the `.desktop` file has `Type=Application` and a valid `Exec=` line.
+- Launch from the app menu first, then pin from the running icon.
 
 ## 🧹 Uninstall
 
 ```bash
-# remove extracted directory OR installed .AppImage
-rm -rf <install-path-or-file>
+# remove the installed app (directory or .AppImage file)
+rm -rf <install-path>
 
-# remove desktop entry
+# remove the desktop entry
 rm ~/.local/share/applications/<app>.desktop
 
-# remove optional latest symlink
-rm <install-dir>/<base-name>-latest
-rm <install-dir>/<base-name>-latest.AppImage
+# remove the -latest symlink if one was created
+rm <install-dir>/<app>-latest
+rm <install-dir>/<app>-latest.AppImage
 ```
