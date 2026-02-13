@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # AppImage Installer Utility
-# Extracts and installs AppImages without requiring sudo
+# Installs AppImages in one of two modes:
+#   1) extract mode (default): extract and run from a directory
+#   2) keep mode: keep and run the .AppImage file directly
 # Usage: ./install-appimage [OPTIONS] <appimage-file> [install-directory]
 
 set -e
@@ -10,6 +12,9 @@ set -e
 DEFAULT_INSTALL_DIR="/home/i/Documents"
 CREATE_DESKTOP_ENTRY=true
 CUSTOM_NAME=""
+INSTALL_MODE="extract"
+EXTRA_EXEC_ARGS=""
+TEMP_DIR=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -30,26 +35,278 @@ print_info() {
     echo -e "${YELLOW}ℹ${NC} $1"
 }
 
+cleanup() {
+    if [[ -n "$TEMP_DIR" ]] && [[ -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR"
+    fi
+}
+
+prompt_backup_existing() {
+    local target_path="$1"
+    local label="$2"
+
+    if [[ -e "$target_path" ]]; then
+        print_info "$label already exists: $target_path"
+        read -p "Do you want to overwrite it? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Installation cancelled."
+            exit 0
+        fi
+        print_info "Backing up existing path to $target_path.backup"
+        rm -rf "$target_path.backup"
+        mv "$target_path" "$target_path.backup"
+    fi
+}
+
+find_desktop_file() {
+    local search_root="$1"
+    local desktop_file
+
+    desktop_file=$(find "$search_root" -maxdepth 1 -type f -name "*.desktop" | head -n 1)
+    if [[ -z "$desktop_file" ]]; then
+        desktop_file=$(find "$search_root" -type f -name "*.desktop" | head -n 1)
+    fi
+
+    echo "$desktop_file"
+}
+
+resolve_icon_path() {
+    local icon_value="$1"
+    local search_root="$2"
+    local desktop_file="$3"
+    local icon_candidate=""
+    local icon_name=""
+    local icon_base=""
+    local search_results=""
+
+    [[ -z "$icon_value" ]] && return 1
+
+    # Absolute icon paths can be used directly when the file exists.
+    if [[ "$icon_value" = /* ]] && [[ -f "$icon_value" ]]; then
+        echo "$icon_value"
+        return 0
+    fi
+
+    # Relative path in desktop file (example: usr/share/icons/app.png).
+    if [[ "$icon_value" == */* ]]; then
+        icon_candidate="$search_root/$icon_value"
+        if [[ -f "$icon_candidate" ]]; then
+            echo "$icon_candidate"
+            return 0
+        fi
+        for ext in png svg xpm; do
+            if [[ -f "${icon_candidate}.${ext}" ]]; then
+                echo "${icon_candidate}.${ext}"
+                return 0
+            fi
+        done
+    fi
+
+    icon_name=$(basename "$icon_value")
+    icon_base="${icon_name%.*}"
+
+    # Named icon (for example: Icon=app-name): search extracted files.
+    search_results=$(find "$search_root" -type f \
+        \( -name "$icon_name" -o -name "${icon_base}.png" -o -name "${icon_base}.svg" -o -name "${icon_base}.xpm" \) \
+        2>/dev/null | sort -V)
+
+    if [[ -n "$search_results" ]]; then
+        echo "$search_results" | tail -n 1
+        return 0
+    fi
+
+    # Fallback: try desktop filename stem as icon name.
+    icon_base=$(basename "$desktop_file" .desktop)
+    search_results=$(find "$search_root" -type f \
+        \( -name "${icon_base}.png" -o -name "${icon_base}.svg" -o -name "${icon_base}.xpm" \) \
+        2>/dev/null | sort -V)
+
+    if [[ -n "$search_results" ]]; then
+        echo "$search_results" | tail -n 1
+        return 0
+    fi
+
+    return 1
+}
+
+persist_icon_path() {
+    local icon_source="$1"
+    local app_name="$2"
+    local icon_dir="$HOME/.local/share/icons/install-appimage"
+    local ext
+    local icon_target
+
+    ext=$(basename "$icon_source")
+    if [[ "$ext" == *.* ]]; then
+        ext="${ext##*.}"
+    else
+        ext="png"
+    fi
+    ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+    mkdir -p "$icon_dir"
+    icon_target="$icon_dir/${app_name}.${ext}"
+    cp -f "$icon_source" "$icon_target"
+    echo "$icon_target"
+}
+
+build_exec_line() {
+    local exec_value="$1"
+    local launch_cmd="$2"
+    local extra_args="$3"
+    local remainder=""
+    local exec_new=""
+
+    remainder=$(echo "$exec_value" | sed -E 's/^("[^"]+"|[^[:space:]]+)[[:space:]]*//')
+    exec_new="\"$launch_cmd\""
+
+    if [[ -n "$extra_args" ]]; then
+        exec_new="$exec_new $extra_args"
+    fi
+
+    if [[ -n "$remainder" ]]; then
+        exec_new="$exec_new $remainder"
+    fi
+
+    echo "$exec_new"
+}
+
+write_desktop_entry() {
+    local desktop_source="$1"
+    local desktop_target="$2"
+    local launch_cmd="$3"
+    local icon_search_root="$4"
+    local custom_name="$5"
+    local default_name="$6"
+    local install_mode="$7"
+    local extra_exec_args="$8"
+
+    local desktop_icon_value=""
+    local resolved_icon_path=""
+    local source_exec_value=""
+    local exec_new=""
+    local saw_exec=false
+    local saw_icon=false
+    local saw_name=false
+    local saw_type=false
+    local saw_terminal=false
+
+    if [[ -n "$desktop_source" ]] && [[ -f "$desktop_source" ]]; then
+        desktop_icon_value=$(grep "^Icon=" "$desktop_source" | head -n 1 | cut -d= -f2-)
+        source_exec_value=$(grep "^Exec=" "$desktop_source" | head -n 1 | cut -d= -f2-)
+    fi
+
+    if [[ -z "$source_exec_value" ]]; then
+        source_exec_value="AppRun %U"
+    fi
+
+    exec_new=$(build_exec_line "$source_exec_value" "$launch_cmd" "$extra_exec_args")
+
+    if [[ -n "$desktop_icon_value" ]]; then
+        if resolved_icon_path=$(resolve_icon_path "$desktop_icon_value" "$icon_search_root" "$desktop_source"); then
+            if [[ "$install_mode" == "keep" ]]; then
+                resolved_icon_path=$(persist_icon_path "$resolved_icon_path" "$default_name")
+            fi
+            print_success "Icon linked: $resolved_icon_path"
+        else
+            print_info "Could not resolve icon path for '$desktop_icon_value'; keeping original desktop icon value"
+        fi
+    fi
+
+    if [[ -n "$desktop_source" ]] && [[ -f "$desktop_source" ]]; then
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^Exec= ]]; then
+                echo "Exec=$exec_new"
+                saw_exec=true
+            elif [[ "$line" =~ ^Icon= ]]; then
+                if [[ -n "$resolved_icon_path" ]]; then
+                    echo "Icon=$resolved_icon_path"
+                else
+                    echo "$line"
+                fi
+                saw_icon=true
+            elif [[ "$line" =~ ^Name= ]]; then
+                if [[ -n "$custom_name" ]]; then
+                    echo "Name=$custom_name"
+                else
+                    echo "$line"
+                fi
+                saw_name=true
+            elif [[ "$line" =~ ^Type= ]]; then
+                echo "$line"
+                saw_type=true
+            elif [[ "$line" =~ ^Terminal= ]]; then
+                echo "$line"
+                saw_terminal=true
+            else
+                echo "$line"
+            fi
+        done < "$desktop_source" > "$desktop_target"
+    else
+        {
+            echo "[Desktop Entry]"
+            echo "Type=Application"
+            echo "Terminal=false"
+        } > "$desktop_target"
+        saw_type=true
+        saw_terminal=true
+    fi
+
+    if [[ "$saw_exec" == false ]]; then
+        echo "Exec=$exec_new" >> "$desktop_target"
+    fi
+
+    if [[ "$saw_name" == false ]]; then
+        if [[ -n "$custom_name" ]]; then
+            echo "Name=$custom_name" >> "$desktop_target"
+        else
+            echo "Name=$default_name" >> "$desktop_target"
+        fi
+    fi
+
+    if [[ "$saw_icon" == false ]] && [[ -n "$resolved_icon_path" ]]; then
+        echo "Icon=$resolved_icon_path" >> "$desktop_target"
+    fi
+
+    if [[ "$saw_type" == false ]]; then
+        echo "Type=Application" >> "$desktop_target"
+    fi
+
+    if [[ "$saw_terminal" == false ]]; then
+        echo "Terminal=false" >> "$desktop_target"
+    fi
+
+    chmod +x "$desktop_target"
+}
+
 show_help() {
     cat << EOF
 Usage: install-appimage [OPTIONS] <appimage-file> [install-directory]
 
+Modes:
+  --extract              Extract AppImage into a directory (default)
+  --keep-appimage        Keep and run the .AppImage file directly
+
 Options:
   -d, --desktop          Create desktop entry (default)
-  --no-desktop          Skip desktop entry creation
-  -n, --name <name>     Custom application name
-  -h, --help            Show this help message
+  --no-desktop           Skip desktop entry creation
+  -n, --name <name>      Custom application name
+  -a, --args <args>      Extra args appended to desktop Exec command
+  -h, --help             Show this help message
 
 Examples:
   install-appimage LM-Studio-0.4.2-2-x64.AppImage
+  install-appimage --keep-appimage LM-Studio-0.4.2-2-x64.AppImage ~/Applications/
+  install-appimage --keep-appimage -a "--no-sandbox" LM-Studio.AppImage
   install-appimage --no-desktop MyApp.AppImage /opt/apps/
   install-appimage -n "LM Studio Beta" LM-Studio-beta.AppImage
 
 Description:
-  This utility extracts AppImages and installs them in a directory structure
-  similar to the working lm-studio-317 installation. It handles chrome-sandbox
-  permission issues by extracting the AppImage contents, and optionally creates
-  desktop entries for easy launching.
+  This utility installs AppImages in two modes:
+    extract: unpacks files and runs AppRun from a stable install directory.
+    keep: stores the .AppImage file and creates launcher entries around it.
+  In both modes it can create desktop entries with resolved icons for pinning.
 
 EOF
 }
@@ -70,8 +327,28 @@ while [[ $# -gt 0 ]]; do
             CREATE_DESKTOP_ENTRY=false
             shift
             ;;
+        --keep-appimage)
+            INSTALL_MODE="keep"
+            shift
+            ;;
+        --extract)
+            INSTALL_MODE="extract"
+            shift
+            ;;
         -n|--name)
+            if [[ -z "${2:-}" ]]; then
+                print_error "Missing value for $1"
+                exit 1
+            fi
             CUSTOM_NAME="$2"
+            shift 2
+            ;;
+        -a|--args)
+            if [[ -z "${2:-}" ]]; then
+                print_error "Missing value for $1"
+                exit 1
+            fi
+            EXTRA_EXEC_ARGS="$2"
             shift 2
             ;;
         -*)
@@ -98,6 +375,11 @@ fi
 
 APPIMAGE_FILE="$1"
 INSTALL_DIR="${2:-$DEFAULT_INSTALL_DIR}"
+APP_DISPLAY_NAME=""
+INSTALL_PATH=""
+APPIMAGE_TARGET=""
+DESKTOP_SOURCE_ROOT=""
+LAUNCH_PATH=""
 
 # Check if AppImage file exists
 if [[ ! -f "$APPIMAGE_FILE" ]]; then
@@ -108,72 +390,85 @@ fi
 # Get absolute path of AppImage
 APPIMAGE_FILE=$(realpath "$APPIMAGE_FILE")
 
-# Extract base name and create installation directory name
+# Extract base name and create names
 APPIMAGE_BASENAME=$(basename "$APPIMAGE_FILE")
-# Remove .AppImage extension and clean up version strings
 APP_NAME=$(echo "$APPIMAGE_BASENAME" | sed -E 's/\.AppImage$//i' | sed -E 's/[-_]x(86_)?64//i' | tr '[:upper:]' '[:lower:]')
-
-# Create installation directory path
-INSTALL_PATH="$INSTALL_DIR/$APP_NAME"
+BASE_APP_NAME=$(echo "$APP_NAME" | sed -E 's/-[0-9]+(\.[0-9]+)*(-[0-9]+)?$//')
 
 print_info "AppImage: $APPIMAGE_BASENAME"
-print_info "Installation directory: $INSTALL_PATH"
+print_info "Mode: $INSTALL_MODE"
+print_info "Install directory: $INSTALL_DIR"
 
-# Check if installation directory already exists
-if [[ -d "$INSTALL_PATH" ]]; then
-    print_info "Installation directory already exists: $INSTALL_PATH"
-    read -p "Do you want to overwrite it? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_info "Installation cancelled."
-        exit 0
-    fi
-    print_info "Backing up existing installation to $INSTALL_PATH.backup"
-    rm -rf "$INSTALL_PATH.backup"
-    mv "$INSTALL_PATH" "$INSTALL_PATH.backup"
-fi
+mkdir -p "$INSTALL_DIR"
 
-# Create temporary extraction directory
+# Extract once to gather metadata and, in extract mode, install files.
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+trap cleanup EXIT
 
-print_info "Extracting AppImage..."
-
-# Make AppImage executable and extract
+print_info "Extracting AppImage metadata..."
 chmod +x "$APPIMAGE_FILE"
+(
+    cd "$TEMP_DIR"
+    "$APPIMAGE_FILE" --appimage-extract > /dev/null 2>&1
+)
 
-# Extract in temporary directory
-cd "$TEMP_DIR"
-"$APPIMAGE_FILE" --appimage-extract > /dev/null 2>&1
-
-if [[ ! -d "squashfs-root" ]]; then
+EXTRACT_ROOT="$TEMP_DIR/squashfs-root"
+if [[ ! -d "$EXTRACT_ROOT" ]]; then
     print_error "Failed to extract AppImage"
     exit 1
 fi
 
 print_success "AppImage extracted successfully"
 
-# Move extracted contents to installation directory
-print_info "Installing to $INSTALL_PATH..."
-mkdir -p "$INSTALL_DIR"
-mv squashfs-root "$INSTALL_PATH"
+if [[ "$INSTALL_MODE" == "extract" ]]; then
+    INSTALL_PATH="$INSTALL_DIR/$APP_NAME"
+    prompt_backup_existing "$INSTALL_PATH" "Installation directory"
 
-# Make AppRun executable
-if [[ -f "$INSTALL_PATH/AppRun" ]]; then
-    chmod +x "$INSTALL_PATH/AppRun"
-    print_success "AppRun configured"
+    print_info "Installing extracted files to $INSTALL_PATH..."
+    mv "$EXTRACT_ROOT" "$INSTALL_PATH"
+    DESKTOP_SOURCE_ROOT="$INSTALL_PATH"
+    LAUNCH_PATH="$INSTALL_PATH/AppRun"
+
+    if [[ -f "$INSTALL_PATH/AppRun" ]]; then
+        chmod +x "$INSTALL_PATH/AppRun"
+        print_success "AppRun configured"
+    else
+        print_error "Warning: AppRun not found in extracted contents"
+    fi
+
+    if [[ -f "$INSTALL_PATH/chrome-sandbox" ]]; then
+        print_info "Fixing chrome-sandbox permissions (requires sudo)..."
+        if sudo chown root:root "$INSTALL_PATH/chrome-sandbox" && sudo chmod 4755 "$INSTALL_PATH/chrome-sandbox"; then
+            print_success "chrome-sandbox permissions configured"
+        else
+            print_error "Failed to set chrome-sandbox permissions"
+            print_info "The application may require --no-sandbox flag to run"
+        fi
+    fi
 else
-    print_error "Warning: AppRun not found in extracted contents"
+    APPIMAGE_TARGET="$INSTALL_DIR/$APP_NAME.AppImage"
+    prompt_backup_existing "$APPIMAGE_TARGET" "Target AppImage file"
+
+    print_info "Installing AppImage file to $APPIMAGE_TARGET..."
+    cp -f "$APPIMAGE_FILE" "$APPIMAGE_TARGET"
+    chmod +x "$APPIMAGE_TARGET"
+    DESKTOP_SOURCE_ROOT="$EXTRACT_ROOT"
+    LAUNCH_PATH="$APPIMAGE_TARGET"
+    print_success "AppImage copied and executable"
 fi
 
-# Fix chrome-sandbox permissions if it exists
-if [[ -f "$INSTALL_PATH/chrome-sandbox" ]]; then
-    print_info "Fixing chrome-sandbox permissions (requires sudo)..."
-    if sudo chown root:root "$INSTALL_PATH/chrome-sandbox" && sudo chmod 4755 "$INSTALL_PATH/chrome-sandbox"; then
-        print_success "chrome-sandbox permissions configured"
+# Create version-agnostic symlink and prefer it for desktop Exec.
+if [[ "$BASE_APP_NAME" != "$APP_NAME" ]]; then
+    if [[ "$INSTALL_MODE" == "extract" ]]; then
+        SYMLINK_PATH="$INSTALL_DIR/${BASE_APP_NAME}-latest"
+        ln -sfn "$APP_NAME" "$SYMLINK_PATH"
+        LAUNCH_PATH="$SYMLINK_PATH/AppRun"
+        print_success "Created symlink: $SYMLINK_PATH -> $APP_NAME"
     else
-        print_error "Failed to set chrome-sandbox permissions"
-        print_info "The application may require --no-sandbox flag to run"
+        SYMLINK_PATH="$INSTALL_DIR/${BASE_APP_NAME}-latest.AppImage"
+        ln -sfn "$(basename "$APPIMAGE_TARGET")" "$SYMLINK_PATH"
+        LAUNCH_PATH="$SYMLINK_PATH"
+        print_success "Created symlink: $SYMLINK_PATH -> $(basename "$APPIMAGE_TARGET")"
     fi
 fi
 
@@ -181,67 +476,28 @@ fi
 if [[ "$CREATE_DESKTOP_ENTRY" == true ]]; then
     print_info "Creating desktop entry..."
 
-    # Find .desktop file in extracted contents
-    DESKTOP_FILE=$(find "$INSTALL_PATH" -maxdepth 1 -name "*.desktop" -type f | head -n 1)
-
+    DESKTOP_FILE=$(find_desktop_file "$DESKTOP_SOURCE_ROOT")
     if [[ -n "$DESKTOP_FILE" ]]; then
         DESKTOP_BASENAME=$(basename "$DESKTOP_FILE")
-        DESKTOP_TARGET="$HOME/.local/share/applications/$DESKTOP_BASENAME"
-
-        # Read the desktop file and update paths
-        mkdir -p "$HOME/.local/share/applications"
-
-        # Process desktop file
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^Exec= ]]; then
-                # Update Exec path to point to our installation
-                EXEC_VALUE=$(echo "$line" | cut -d= -f2-)
-                # Replace 'AppRun' or relative paths with absolute path
-                EXEC_NEW=$(echo "$EXEC_VALUE" | sed "s|^\./\?AppRun|$INSTALL_PATH/AppRun|" | sed "s|^AppRun|$INSTALL_PATH/AppRun|")
-                # Remove --no-sandbox flag since we're fixing chrome-sandbox permissions
-                EXEC_NEW=$(echo "$EXEC_NEW" | sed 's/--no-sandbox *//')
-                echo "Exec=$EXEC_NEW"
-            elif [[ "$line" =~ ^Icon= ]]; then
-                # Update Icon path if it's a relative path
-                ICON_VALUE=$(echo "$line" | cut -d= -f2-)
-                if [[ ! "$ICON_VALUE" =~ ^/ ]]; then
-                    # Relative path, make it absolute
-                    echo "Icon=$INSTALL_PATH/$ICON_VALUE"
-                else
-                    echo "$line"
-                fi
-            elif [[ "$line" =~ ^Name= ]] && [[ -n "$CUSTOM_NAME" ]]; then
-                # Use custom name if provided
-                echo "Name=$CUSTOM_NAME"
-            else
-                echo "$line"
-            fi
-        done < "$DESKTOP_FILE" > "$DESKTOP_TARGET"
-
-        chmod +x "$DESKTOP_TARGET"
-
-        # Update desktop database
-        if command -v update-desktop-database &> /dev/null; then
-            update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-        fi
-
-        print_success "Desktop entry created: $DESKTOP_TARGET"
-
-        # Extract application name from desktop file
-        APP_DISPLAY_NAME=$(grep "^Name=" "$DESKTOP_TARGET" | head -n 1 | cut -d= -f2-)
     else
-        print_error "Warning: No .desktop file found in AppImage"
-        print_info "You can manually create a desktop entry later"
+        DESKTOP_BASENAME="${BASE_APP_NAME:-$APP_NAME}.desktop"
+        print_info "No desktop file found in AppImage; creating a generic desktop entry"
     fi
-fi
 
-# Create a version-agnostic symlink
-# Extract base app name without version numbers
-BASE_APP_NAME=$(echo "$APP_NAME" | sed -E 's/-[0-9]+(\.[0-9]+)*(-[0-9]+)?$//')
-if [[ "$BASE_APP_NAME" != "$APP_NAME" ]]; then
-    SYMLINK_PATH="$INSTALL_DIR/${BASE_APP_NAME}-latest"
-    ln -sfn "$APP_NAME" "$SYMLINK_PATH"
-    print_success "Created symlink: $SYMLINK_PATH -> $APP_NAME"
+    DESKTOP_TARGET="$HOME/.local/share/applications/$DESKTOP_BASENAME"
+    mkdir -p "$HOME/.local/share/applications"
+
+    write_desktop_entry "$DESKTOP_FILE" "$DESKTOP_TARGET" "$LAUNCH_PATH" "$DESKTOP_SOURCE_ROOT" \
+        "$CUSTOM_NAME" "$APP_NAME" "$INSTALL_MODE" "$EXTRA_EXEC_ARGS"
+
+    if command -v update-desktop-database &> /dev/null; then
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    fi
+
+    APP_DISPLAY_NAME=$(grep "^Name=" "$DESKTOP_TARGET" | head -n 1 | cut -d= -f2-)
+    print_success "Desktop entry created: $DESKTOP_TARGET"
+else
+    print_info "Skipping desktop entry creation (--no-desktop)"
 fi
 
 # Installation complete
@@ -249,14 +505,19 @@ echo
 print_success "Installation complete!"
 echo
 echo "Installation details:"
-echo "  Location: $INSTALL_PATH"
-echo "  Launch command: $INSTALL_PATH/AppRun"
+echo "  Mode: $INSTALL_MODE"
+if [[ "$INSTALL_MODE" == "extract" ]]; then
+    echo "  Location: $INSTALL_PATH"
+else
+    echo "  Location: $APPIMAGE_TARGET"
+fi
+echo "  Launch command: $LAUNCH_PATH"
 
 if [[ -n "$APP_DISPLAY_NAME" ]] && [[ "$CREATE_DESKTOP_ENTRY" == true ]]; then
     echo "  Desktop entry: $APP_DISPLAY_NAME"
 fi
 
 echo
-print_info "To update to a newer version, simply run this script again with the new AppImage"
+print_info "To update to a newer version, run this script again with the new AppImage"
 echo "  Example: $0 $APPIMAGE_BASENAME"
 echo

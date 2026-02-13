@@ -1,146 +1,173 @@
-# install-appimage
+# 🚀 install-appimage
 
-Utility script to install AppImages by extracting them into a normal directory, optionally creating a desktop entry and a `-latest` symlink.
+Install AppImages so they show in your app launcher, get proper icons, and can be pinned/favorited.
 
-This approach is useful for Electron-based AppImages that have sandbox permission issues when run directly.
+Works in two modes:
 
-## Quick Reference
+- 📦 `extract` mode (default): unpack AppImage and run `AppRun`
+- 🧳 `keep` mode: keep the `.AppImage` file and launch it directly
 
-### Basic install
+## 🔎 Common Error This Solves
+
+If you searched for these errors, this tool is for you:
+
+```text
+FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:166
+The SUID sandbox helper binary was found, but is not configured correctly.
+You need to make sure that /tmp/.mount_.../chrome-sandbox is owned by root and has mode 4755.
+```
+
+Search terms this README targets:
+
+- `LM Studio AppImage not launching Ubuntu`
+- `setuid_sandbox_host.cc:166`
+- `AppImage chrome-sandbox mode 4755`
+- `The SUID sandbox helper binary was found`
+- `AppImage desktop icon not showing`
+- `How to pin AppImage to dock`
+
+## ✨ What You Get
+
+- ✅ Desktop entry in `~/.local/share/applications`
+- ✅ Icon path resolved from inside the AppImage
+- ✅ Launch command rewritten to a stable install path
+- ✅ Version-agnostic `-latest` symlink for easier updates
+- ✅ App launcher visibility and pin-to-dock/favorites support
+
+## ⚡ Quick Start
+
+### 1) Fix LM Studio / Electron sandbox errors fast (recommended)
 
 ```bash
 ./install-appimage LM-Studio-0.4.2-2-x64.AppImage
 ```
 
-### Update to a newer version
+This uses `extract` mode and is best for problematic sandbox cases.
+
+### 2) Keep AppImage file as-is (no full extracted install)
 
 ```bash
-./install-appimage LM-Studio-0.5.0-x64.AppImage
+./install-appimage --keep-appimage MyApp.AppImage ~/Applications/
 ```
 
-If the target install directory already exists, the script offers to back it up as `*.backup` before replacing it.
+This keeps execution from the `.AppImage` file while still creating desktop launcher + icon.
 
-### Common variants
+### 3) Keep mode + custom runtime args (for stubborn apps)
 
 ```bash
-# custom install directory
-./install-appimage MyApp.AppImage ~/Applications/
-
-# skip desktop entry
-./install-appimage --no-desktop MyApp.AppImage
-
-# custom app display name in desktop entry
-./install-appimage -n "My App Beta" MyApp.AppImage
+./install-appimage --keep-appimage -a "--no-sandbox" MyApp.AppImage ~/Applications/
 ```
 
-## Usage
+## 🧠 How It Works
+
+### 📦 Extract mode (default)
+
+1. Extracts the AppImage.
+1. Installs to a stable directory like `/home/i/Documents/myapp-1.2.3/`.
+1. Sets desktop `Exec=` to stable `AppRun` path.
+1. Resolves icon to an absolute image path.
+1. Creates `<app>-latest` symlink when version is detected.
+
+### 🧳 Keep mode
+
+1. Copies `.AppImage` to target install directory.
+1. Marks it executable.
+1. Builds desktop entry that points `Exec=` to that `.AppImage` (or `<app>-latest.AppImage` symlink).
+1. Extracts icon metadata and persists icon under `~/.local/share/icons/install-appimage/`.
+
+## 🛠 Usage
 
 ```text
 install-appimage [OPTIONS] <appimage-file> [install-directory]
+
+Modes:
+  --extract              Extract AppImage into a directory (default)
+  --keep-appimage        Keep and run the .AppImage file directly
 
 Options:
   -d, --desktop          Create desktop entry (default)
   --no-desktop           Skip desktop entry creation
   -n, --name <name>      Custom application name
+  -a, --args <args>      Extra args appended to desktop Exec command
   -h, --help             Show help message
 ```
 
-## What It Creates
+## 📌 Pinning Notes
 
-For `LM-Studio-0.4.2-2-x64.AppImage`, default install location is:
+To pin/favorite in GNOME/KDE/XFCE:
 
-```text
-/home/i/Documents/lm-studio-0.4.2-2/
+1. Install with desktop entry enabled (default).
+1. Launch app from app menu once.
+1. Right-click running app icon and choose Pin/Favorite.
+
+If pinning does not appear immediately, refresh desktop database:
+
+```bash
+update-desktop-database ~/.local/share/applications/
 ```
 
-Typical outputs:
+## 🧪 Examples
 
-- Extracted app directory (contains `AppRun` and bundled files)
-- Desktop file in `~/.local/share/applications/` (unless `--no-desktop`)
-- Symlink like `lm-studio-latest -> lm-studio-0.4.2-2` (when version suffix is detected)
+```bash
+# default extract install
+./install-appimage LM-Studio-0.4.2-2-x64.AppImage
 
-## Behavior Details
+# keep mode in custom directory
+./install-appimage --keep-appimage Bambu_Studio_ubuntu-24.04_PR-9540.AppImage ~/Applications/
 
-### Extraction flow
+# no desktop entry
+./install-appimage --no-desktop "OrcaSlicer_Linux_AppImage_Ubuntu2404_nightly (1).AppImage"
 
-The script:
-1. Makes the AppImage executable.
-1. Runs `--appimage-extract` into a temporary directory.
-1. Moves `squashfs-root` to the final install path.
+# custom launcher name
+./install-appimage -n "LM Studio Development" LM-Studio-dev.AppImage
+```
 
-### Desktop entry rewrite
+## 🆘 Troubleshooting
 
-When a `.desktop` file exists in the extracted root, the script:
+### `The SUID sandbox helper binary was found, but is not configured correctly`
 
-- Rewrites `Exec=` to point at absolute `<install-path>/AppRun`
-- Rewrites relative `Icon=` paths to absolute install paths
-- Applies `-n/--name` override to `Name=`
-- Writes the result to `~/.local/share/applications/`
+Use extract mode:
 
-### `chrome-sandbox` handling
+```bash
+./install-appimage <your-file>.AppImage
+```
 
-If `chrome-sandbox` exists, the script tries:
+It avoids relying on fragile `/tmp/.mount_*` runtime paths and uses a stable install location.
+
+### `/tmp/.mount_.../chrome-sandbox is owned by root and has mode 4755`
+
+Same fix: install via this tool instead of direct `./AppImage` launch.
+
+In extract mode, if `chrome-sandbox` exists, the script tries:
 
 ```bash
 sudo chown root:root <install-path>/chrome-sandbox
 sudo chmod 4755 <install-path>/chrome-sandbox
 ```
 
-If that fails, installation still completes, but the app may need `--no-sandbox` depending on the app.
+### App icon missing in launcher
 
-## Launching
+- Re-run install so icon resolution is regenerated.
+- Confirm desktop file exists in `~/.local/share/applications/`.
+- Refresh desktop db:
+  `update-desktop-database ~/.local/share/applications/`
 
-- Desktop launcher from app menu (if desktop entry was created)
-- Command line: `<install-path>/AppRun`
-- Symlink path: `<install-dir>/<base-name>-latest/AppRun`
+### App not visible in menu / not pinnable
 
-## Troubleshooting
+- Log out/in once after installation.
+- Ensure the `.desktop` file has `Type=Application` and valid `Exec=`.
+- Launch from app menu first, then pin from running icon.
 
-### AppImage not found
-
-- Verify the file path.
-- Use absolute paths when in doubt.
-
-### Extraction failed
-
-- Ensure the AppImage is executable: `chmod +x <file>.AppImage`
-- Confirm the file is valid and not corrupted.
-
-### Desktop entry not visible
-
-- Run `update-desktop-database ~/.local/share/applications/`
-- Confirm the desktop file exists in `~/.local/share/applications/`
-- Log out/in if your desktop shell caches launchers.
-
-### App does not start
-
-- Run `<install-path>/AppRun` in terminal to inspect errors.
-- Ensure `AppRun` is executable.
-- If sandbox errors persist, run the app with `--no-sandbox` if supported.
-
-## Uninstall
+## 🧹 Uninstall
 
 ```bash
-# app directory
-rm -rf <install-path>
+# remove extracted directory OR installed .AppImage
+rm -rf <install-path-or-file>
 
-# desktop entry (file name depends on app)
+# remove desktop entry
 rm ~/.local/share/applications/<app>.desktop
 
-# optional symlink
+# remove optional latest symlink
 rm <install-dir>/<base-name>-latest
-
-# refresh desktop db if available
-update-desktop-database ~/.local/share/applications/
+rm <install-dir>/<base-name>-latest.AppImage
 ```
-
-## Example Commands
-
-```bash
-./install-appimage LM-Studio-0.4.2-2-x64.AppImage
-./install-appimage Bambu_Studio_ubuntu-24.04_PR-9540.AppImage ~/Applications/
-./install-appimage --no-desktop "OrcaSlicer_Linux_AppImage_Ubuntu2404_nightly (1).AppImage"
-./install-appimage -n "LM Studio Development" LM-Studio-dev.AppImage
-```
-
-If everything works, you can safely remove the old `lm-studio-317/` installation and use the new one managed by this script.
